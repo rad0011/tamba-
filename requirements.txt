@@ -11,6 +11,8 @@ pytz
 tenacity
 redis
 httpx
-pyjwt
+pyjwt[crypto]
 passlib[bcrypt]
 bcrypt
+apscheduler
+aiobreaker
