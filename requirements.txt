@@ -1,14 +1,16 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.0
-aiosqlite==0.20.0
-sqlalchemy==2.0.35
-pydantic==2.9.2
-pydantic-settings==2.5.2
-python-multipart==0.0.9
-python-dotenv==1.0.1
-phonenumbers==8.13.42
-pytz==2024.1
-tenacity==8.5.0
-redis==5.0.1
-httpx[http2]==0.28.1       # ← version compatible avec firebase-admin
-pyjwt[crypto]==2.10.1      # ← version compatible
+fastapi
+uvicorn[standard]
+aiosqlite
+sqlalchemy
+pydantic
+pydantic-settings
+python-multipart
+python-dotenv
+phonenumbers
+pytz
+tenacity
+redis
+httpx
+pyjwt
+passlib[bcrypt]
+bcrypt
