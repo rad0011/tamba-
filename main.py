@@ -1,5 +1,5 @@
 # =====================================================
-# TAMBA - PRODUCTION READY v14.0 - ADAPTÉ SQLITE
+# TAMBA - PRODUCTION READY v14.0 (FULL MONOLITH)
 # =====================================================
 
 import os
@@ -44,22 +44,19 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.jobstores.memory import MemoryJobStore
 import aiobreaker
 
-if os.path.exists("tamba.db"):
-    os.remove("tamba.db")
-    print("Ancienne base supprimée, recréation propre.")
 # =====================================================
 # CONFIGURATION
 # =====================================================
 class Settings(BaseSettings):
-    DATABASE_URL: str = "sqlite+aiosqlite:///./tamba.db"   # Changé pour SQLite
+    DATABASE_URL: str = "sqlite+aiosqlite:///./tamba.db"
     REDIS_URL: str = "redis://localhost:6379/0"
     REDIS_PASSWORD: str = ""
-    REDIS_REQUIRED: bool = True
+    REDIS_REQUIRED: bool = False
     JWT_SECRET: str = ""
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
-    ENVIRONMENT: str = "development"
+    ENVIRONMENT: str = "production"
     DEBUG: bool = False
     PLATFORM_COMMISSION_RATE: Decimal = Decimal("0.03")
     PLATFORM_ACCOUNT_ID: str = "platform"
@@ -67,7 +64,7 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: str = "*"
 
     DEFAULT_ADMIN_EMAIL: str = "admin@tamba.com"
-    DEFAULT_ADMIN_PASSWORD: str = "Admin123!"   # Change en production
+    DEFAULT_ADMIN_PASSWORD: str = "Admin123456!"
     DEFAULT_ADMIN_PHONE: str = "+221781234567"
 
     WAVE_API_KEY: str = "test"
@@ -120,9 +117,9 @@ class Settings(BaseSettings):
         super().__init__(**kwargs)
         if not self.JWT_SECRET:
             self.JWT_SECRET = os.urandom(32).hex()
-            logging.warning("JWT_SECRET généré aléatoirement.")
+            logging.warning("JWT_SECRET generated randomly.")
         if self.ENVIRONMENT == "production" and not self.DEFAULT_ADMIN_PASSWORD:
-            raise ValueError("DEFAULT_ADMIN_PASSWORD obligatoire en production.")
+            raise ValueError("DEFAULT_ADMIN_PASSWORD is required in production.")
 
     @property
     def allowed_origins_list(self) -> List[str]:
@@ -141,22 +138,23 @@ logger = logging.getLogger("tamba")
 # =====================================================
 # DATABASE (SQLite)
 # =====================================================
-# Pas de pool_size/max_overflow pour SQLite
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG,
-    connect_args={"check_same_thread": False}  # Nécessaire pour SQLite avec asyncio
+    connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {}
 )
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 Base = declarative_base()
 
 # =====================================================
-# REDIS (identique)
+# REDIS (optionnel)
 # =====================================================
 redis_client = None
 
 async def get_redis():
     global redis_client
+    if not settings.REDIS_REQUIRED:
+        return None
     if redis_client is None:
         try:
             redis_client = await redis.from_url(
@@ -165,11 +163,9 @@ async def get_redis():
                 decode_responses=True
             )
             await redis_client.ping()
-            logger.info("Redis connecté")
+            logger.info("Redis connected")
         except Exception as e:
-            logger.error(f"Connexion Redis échouée: {e}")
-            if settings.REDIS_REQUIRED:
-                raise RuntimeError(f"Redis indisponible: {e}")
+            logger.error(f"Redis connection failed: {e}")
             redis_client = None
     return redis_client
 
@@ -234,7 +230,7 @@ class KycLevel(str, Enum):
     KYC2 = "KYC2"
 
 # =====================================================
-# MODÈLES SQLAlchemy (adaptés SQLite)
+# MODÈLES SQLAlchemy
 # =====================================================
 class UserDB(Base):
     __tablename__ = "users"
@@ -318,7 +314,6 @@ class TransactionDB(Base):
     produit = relationship("ProduitDB")
 
     __table_args__ = (
-        # SQLite ne supporte pas les index partiels, on laisse un index simple
         Index("ix_tx_external_ref", "external_reference", unique=False),
     )
 
@@ -513,7 +508,7 @@ class ProcessedWebhook(Base):
 
 
 # =====================================================
-# SCHÉMAS PYDANTIC (inchangés)
+# SCHÉMAS PYDANTIC
 # =====================================================
 class UserCreate(BaseModel):
     email: EmailStr
@@ -854,7 +849,7 @@ class AdminUsersQuery(BaseModel):
 
 
 # =====================================================
-# AUTHENTIFICATION (inchangée)
+# AUTHENTIFICATION
 # =====================================================
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 pin_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -865,23 +860,30 @@ VALID_OTP_PURPOSES = frozenset([
     "pin", "email_change", "complete_registration"
 ])
 
+
 def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
+
 
 def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
+
 def verify_pin_hash(plain: str, hashed: str) -> bool:
     return pin_context.verify(plain, hashed)
+
 
 def get_pin_hash(pin: str) -> str:
     return pin_context.hash(pin)
 
+
 def hash_otp(code: str) -> str:
     return otp_context.hash(code)
 
+
 def verify_otp_hash(code: str, hashed: str) -> bool:
     return otp_context.verify(code, hashed)
+
 
 def create_access_token(data: dict) -> str:
     expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -889,11 +891,13 @@ def create_access_token(data: dict) -> str:
     to_encode.update({"exp": expire, "type": "access"})
     return jwt.encode(to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
+
 def create_refresh_token(data: dict) -> str:
     expire = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     to_encode = data.copy()
     to_encode.update({"exp": expire, "type": "refresh"})
     return jwt.encode(to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
+
 
 async def verify_token(token: str, token_type: str) -> str:
     try:
@@ -912,11 +916,14 @@ async def verify_token(token: str, token_type: str) -> str:
     except jwt.InvalidTokenError:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token invalide")
 
+
 async def get_db():
     async with AsyncSessionLocal() as session:
         yield session
 
+
 security = HTTPBearer()
+
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
@@ -931,12 +938,14 @@ async def get_current_user(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Compte bloqué")
     return user
 
+
 async def get_current_admin(
     current_user: UserDB = Depends(get_current_user),
 ) -> UserDB:
     if not current_user.is_admin:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Accès administrateur requis")
     return current_user
+
 
 def user_to_out(user: UserDB) -> UserOut:
     return UserOut(
@@ -958,7 +967,7 @@ def user_to_out(user: UserDB) -> UserOut:
 
 
 # =====================================================
-# SERVICES EXTERNES (inchangés)
+# SERVICES EXTERNES
 # =====================================================
 class SMSService:
     @staticmethod
@@ -977,6 +986,7 @@ class SMSService:
                 logger.error(f"Erreur envoi SMS à {phone}: {e}")
         else:
             logger.info(f"[SIMULATION SMS] à {phone}: {message}")
+
 
 class PushNotificationService:
     _initialized = False
@@ -1015,6 +1025,7 @@ class PushNotificationService:
         except Exception as e:
             logger.error(f"Erreur push: {e}")
 
+
 class StorageService:
     @staticmethod
     async def upload_file(file: UploadFile, filename: str) -> str:
@@ -1043,11 +1054,15 @@ class StorageService:
                 logger.error(f"Erreur upload S3: {e}")
                 raise HTTPException(500, "Erreur lors de l'upload du fichier")
         else:
+            # Création du dossier si inexistant
+            os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
             filepath = Path(settings.UPLOAD_DIR) / filename
             content = await file.read()
             filepath.write_bytes(content)
             return f"/uploads/{filename}"
 
+
+# Circuit breaker Wave
 wave_circuit_breaker = aiobreaker.CircuitBreaker(
     fail_max=settings.WAVE_CIRCUIT_FAILURE_THRESHOLD,
     timeout_duration=settings.WAVE_CIRCUIT_RECOVERY_TIMEOUT
@@ -1055,7 +1070,7 @@ wave_circuit_breaker = aiobreaker.CircuitBreaker(
 
 
 # =====================================================
-# FONCTIONS MÉTIER CORE (inchangées)
+# FONCTIONS MÉTIER CORE
 # =====================================================
 async def rate_limit_check(key: str, limit: int, period: int = 60, request: Request = None):
     if request is None:
@@ -1070,6 +1085,7 @@ async def rate_limit_check(key: str, limit: int, period: int = 60, request: Requ
             status.HTTP_429_TOO_MANY_REQUESTS,
             f"Trop de requêtes. Limite: {limit} par {period}s."
         )
+
 
 async def add_ledger_entry(
     user_id: str,
@@ -1087,6 +1103,7 @@ async def add_ledger_entry(
         reference=reference
     )
     db.add(entry)
+
 
 async def check_kyc_limits(user: UserDB, amount: Decimal, operation: str):
     effective_level = user.kyc_level
@@ -1113,6 +1130,7 @@ async def check_kyc_limits(user: UserDB, amount: Decimal, operation: str):
             status.HTTP_403_FORBIDDEN,
             f"Votre niveau KYC ({effective_level}) ne permet pas de {operation} plus de {limit} FCFA"
         )
+
 
 async def generate_and_send_otp(
     user_id: str,
@@ -1153,6 +1171,7 @@ async def generate_and_send_otp(
     )
     logger.info(f"OTP généré pour user={user_id} purpose={purpose}")
 
+
 async def verify_otp(
     user_id: str,
     purpose: str,
@@ -1180,10 +1199,12 @@ async def verify_otp(
             return True
     return False
 
+
 async def verify_pin(user: UserDB, pin: str) -> bool:
     if not user.pin_hash:
         return False
     return verify_pin_hash(pin, user.pin_hash)
+
 
 async def detect_fraude(user: UserDB, montant: Decimal, db: AsyncSession, request: Request):
     time_limit = datetime.now(timezone.utc) - timedelta(minutes=5)
@@ -1203,6 +1224,7 @@ async def detect_fraude(user: UserDB, montant: Decimal, db: AsyncSession, reques
         await db.commit()
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Compte bloqué pour suspicion de fraude")
 
+
 async def update_score(user: UserDB, action: str, db: AsyncSession):
     score_delta = {"paiement": 2, "achat": 1, "vente": 2}.get(action, 0)
     nb_field = {"paiement": "nb_paiements", "achat": "nb_achats", "vente": "nb_ventes"}.get(action)
@@ -1212,6 +1234,7 @@ async def update_score(user: UserDB, action: str, db: AsyncSession):
         setattr(user, nb_field, current_val + 1)
 
     user.score = max(0, min(1000, user.score + score_delta))
+
 
 async def transfer_to_savings(user: UserDB, montant: Decimal, db: AsyncSession):
     if montant <= 0:
@@ -1250,6 +1273,7 @@ async def transfer_to_savings(user: UserDB, montant: Decimal, db: AsyncSession):
     await db.commit()
     await db.refresh(user)
 
+
 async def suggerer_produits(user: UserDB, db: AsyncSession) -> List[Dict]:
     cache_key = f"suggestions:{user.id}"
     cached = await redis_get(cache_key)
@@ -1269,6 +1293,7 @@ async def suggerer_produits(user: UserDB, db: AsyncSession) -> List[Dict]:
     ]
     await redis_setex(cache_key, 300, json.dumps(suggestions))
     return suggestions
+
 
 async def create_notification(
     user_id: str,
@@ -1292,6 +1317,7 @@ async def create_notification(
             asyncio.create_task(
                 PushNotificationService.send_push(dt.token, title, content)
             )
+
 
 async def get_or_create_user_by_telephone(
     telephone: str,
@@ -1326,6 +1352,7 @@ async def get_or_create_user_by_telephone(
 
     return user
 
+
 async def save_upload_file(
     upload_file: UploadFile,
     allowed_types: List[str] = None
@@ -1354,7 +1381,7 @@ async def save_upload_file(
 
 
 # =====================================================
-# PAYMENT GATEWAY (inchangé)
+# PAYMENT GATEWAY
 # =====================================================
 class PaymentGateway(ABC):
     @abstractmethod
@@ -1372,6 +1399,7 @@ class PaymentGateway(ABC):
     @abstractmethod
     def verify_webhook(self, payload: bytes, headers: Dict[str, str]) -> bool:
         pass
+
 
 class WaveGateway(PaymentGateway):
     name = "wave"
@@ -1507,6 +1535,7 @@ class WaveGateway(PaymentGateway):
         except Exception as e:
             logger.error(f"Erreur log paiement: {e}")
 
+
 class PaymentGatewayFactory:
     @classmethod
     def get_gateway(cls, operator: str = "wave") -> PaymentGateway:
@@ -1516,7 +1545,7 @@ class PaymentGatewayFactory:
 
 
 # =====================================================
-# LOGIQUE TONTINE (inchangée)
+# LOGIQUE TONTINE
 # =====================================================
 async def determiner_prochain_beneficiaire(
     tontine: TontineDB, db: AsyncSession
@@ -1536,6 +1565,7 @@ async def determiner_prochain_beneficiaire(
     else:
         return random.choice(membres).user_id
 
+
 async def initialiser_tour(tontine: TontineDB, db: AsyncSession):
     beneficiaire_id = await determiner_prochain_beneficiaire(tontine, db)
     if not beneficiaire_id:
@@ -1549,6 +1579,7 @@ async def initialiser_tour(tontine: TontineDB, db: AsyncSession):
     )
     db.add(tour)
     tontine.beneficiaire_actuel_id = beneficiaire_id
+
 
 async def verifier_et_cloturer_cycle(tontine: TontineDB, db: AsyncSession):
     nb_membres_result = await db.execute(
@@ -1586,6 +1617,7 @@ async def verifier_et_cloturer_cycle(tontine: TontineDB, db: AsyncSession):
             tontine.montant_collecte_cycle = Decimal("0.00")
             await initialiser_tour(tontine, db)
 
+
 async def envoyer_rappel_cotisation(tontine: TontineDB, db: AsyncSession):
     cotisants_result = await db.execute(
         select(CotisationDB.user_id).where(
@@ -1619,18 +1651,20 @@ async def envoyer_rappel_cotisation(tontine: TontineDB, db: AsyncSession):
 # =====================================================
 scheduler = AsyncIOScheduler(jobstores={"default": MemoryJobStore()})
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ──
+    # Création du dossier uploads
+    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+
     await get_redis()
     await PushNotificationService.initialize()
 
-    # Création automatique des tables (pour SQLite)
+    # Création des tables SQLite
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         logger.info("Tables de la base de données créées/vérifiées")
-
-    Path(settings.UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
 
     # Compte plateforme
     async with AsyncSessionLocal() as db:
@@ -1708,12 +1742,13 @@ async def lifespan(app: FastAPI):
         await redis_client.aclose()
     logger.info("Tamba arrêtée proprement")
 
+
 app = FastAPI(
     title="Tamba API",
     version="14.0",
     lifespan=lifespan,
-    docs_url="/docs" if settings.ENVIRONMENT != "production" else None,
-    redoc_url="/redoc" if settings.ENVIRONMENT != "production" else None,
+    docs_url="/docs" if settings.ENVIRONMENT != "production" else "/docs",
+    redoc_url="/redoc" if settings.ENVIRONMENT != "production" else "/redoc",
 )
 
 app.add_middleware(
@@ -1726,7 +1761,9 @@ app.add_middleware(
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
 app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")
 
+
 async def scheduled_reminders():
+    """Tâche planifiée — verrou Redis pour multi-instances."""
     lock_key = "lock:scheduled_reminders"
     lock_value = str(uuid.uuid4())
     locked = await redis_setnx(lock_key, lock_value, ttl=300)
@@ -1750,7 +1787,7 @@ async def scheduled_reminders():
 
 
 # =====================================================
-# ENDPOINTS AUTH (inchangés)
+# ENDPOINTS AUTH
 # =====================================================
 @app.post("/auth/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 async def register(
@@ -1785,6 +1822,7 @@ async def register(
     await db.refresh(user)
     return user_to_out(user)
 
+
 @app.post("/auth/complete", response_model=UserOut)
 async def complete_registration(
     req: CompleteRegistrationRequest,
@@ -1818,6 +1856,7 @@ async def complete_registration(
     await db.refresh(user)
     return user_to_out(user)
 
+
 @app.post("/auth/login", response_model=Token)
 async def login(
     login_data: LoginRequest,
@@ -1844,6 +1883,7 @@ async def login(
     refresh_token = create_refresh_token({"sub": user.id})
     return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
 
+
 @app.post("/auth/refresh", response_model=Token)
 async def refresh_token(request: Request):
     auth = request.headers.get("Authorization", "")
@@ -1854,6 +1894,7 @@ async def refresh_token(request: Request):
     new_access = create_access_token({"sub": user_id})
     return {"access_token": new_access, "refresh_token": token, "token_type": "bearer"}
 
+
 @app.post("/auth/logout")
 async def logout(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
@@ -1863,11 +1904,12 @@ async def logout(credentials: HTTPAuthorizationCredentials = Depends(security)):
 
 
 # =====================================================
-# ENDPOINTS UTILISATEUR (inchangés)
+# ENDPOINTS UTILISATEUR
 # =====================================================
 @app.get("/users/me", response_model=UserOut)
 async def get_me(current_user: UserDB = Depends(get_current_user)):
     return user_to_out(current_user)
+
 
 @app.patch("/users/me/settings")
 async def update_settings(
@@ -1879,6 +1921,7 @@ async def update_settings(
         setattr(current_user, key, value)
     await db.commit()
     return {"ok": True}
+
 
 @app.post("/users/me/update-email")
 async def update_email(
@@ -1900,6 +1943,7 @@ async def update_email(
     await db.commit()
     return {"ok": True}
 
+
 @app.post("/users/me/pin/set")
 async def set_pin(
     req: PinSetRequest,
@@ -1913,6 +1957,7 @@ async def set_pin(
     await db.commit()
     return {"ok": True, "message": "PIN enregistré avec succès"}
 
+
 @app.post("/users/me/pin/verify")
 async def verify_pin_endpoint(
     req: PinVerifyRequest,
@@ -1921,6 +1966,7 @@ async def verify_pin_endpoint(
     if not await verify_pin(current_user, req.pin):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "PIN incorrect")
     return {"ok": True}
+
 
 @app.post("/users/me/otp/send")
 async def send_otp(
@@ -1940,6 +1986,7 @@ async def send_otp(
     await generate_and_send_otp(current_user.id, req.purpose, db, current_user.telephone, request)
     return {"ok": True, "message": "Code OTP envoyé par SMS"}
 
+
 @app.post("/users/me/verify-otp")
 async def verify_otp_endpoint(
     req: OtpVerifyRequest,
@@ -1951,6 +1998,7 @@ async def verify_otp_endpoint(
     if not valid:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Code OTP invalide ou expiré")
     return {"ok": True}
+
 
 @app.post("/users/me/change-password")
 async def change_password(
@@ -1971,6 +2019,7 @@ async def change_password(
     current_user.hashed_password = get_password_hash(req.new_password)
     await db.commit()
     return {"ok": True}
+
 
 @app.post("/users/me/deposit")
 async def initiate_deposit(
@@ -2018,6 +2067,7 @@ async def initiate_deposit(
     await db.commit()
     return {"checkout_url": wave_resp["checkout_url"], "transaction_id": transaction.id}
 
+
 @app.post("/users/me/save", response_model=UserOut)
 async def save_money(
     epargne_data: EpargneRequest,
@@ -2028,12 +2078,14 @@ async def save_money(
     await db.refresh(current_user)
     return user_to_out(current_user)
 
+
 @app.get("/users/me/savings/stats")
 async def get_savings_stats(current_user: UserDB = Depends(get_current_user)):
     return {
         "epargne": str(current_user.epargne),
         "solde": str(current_user.solde)
     }
+
 
 @app.get("/users/me/transactions", response_model=List[TransactionOut])
 async def get_transactions(
@@ -2054,6 +2106,7 @@ async def get_transactions(
     result = await db.execute(query)
     return result.scalars().all()
 
+
 @app.get("/users/me/notifications", response_model=List[NotificationOut])
 async def get_notifications(
     current_user: UserDB = Depends(get_current_user),
@@ -2069,6 +2122,7 @@ async def get_notifications(
         .offset(skip).limit(limit)
     )
     return result.scalars().all()
+
 
 @app.post("/users/me/withdraw")
 async def withdraw(
@@ -2153,6 +2207,7 @@ async def withdraw(
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Erreur lors du transfert Wave. Solde remboursé.")
 
     return {"ok": True, "message": "Retrait en cours de traitement"}
+
 
 @app.post("/users/me/transfer")
 async def transfer(
@@ -2248,6 +2303,7 @@ async def transfer(
 
     return {"ok": True, "message": f"Transfert de {req.montant} FCFA vers {phone_e164} effectué"}
 
+
 @app.get("/users/me/stats")
 async def user_stats(
     current_user: UserDB = Depends(get_current_user),
@@ -2274,6 +2330,7 @@ async def user_stats(
         "score": current_user.score
     }
 
+
 @app.post("/users/me/kyc/upload")
 async def upload_kyc(
     doc_type: str,
@@ -2293,6 +2350,7 @@ async def upload_kyc(
     await db.commit()
     return {"ok": True, "message": "Document soumis. En attente d'approbation."}
 
+
 @app.post("/users/me/device-token")
 async def register_device_token(
     req: DeviceTokenRequest,
@@ -2309,7 +2367,7 @@ async def register_device_token(
 
 
 # =====================================================
-# MARKETPLACE (inchangé)
+# MARKETPLACE
 # =====================================================
 @app.get("/products", response_model=List[ProduitOut])
 async def list_products(
@@ -2324,6 +2382,7 @@ async def list_products(
         .offset(skip).limit(limit)
     )
     return result.scalars().all()
+
 
 @app.post("/users/me/products", response_model=ProduitOut, status_code=status.HTTP_201_CREATED)
 async def add_product(
@@ -2344,6 +2403,17 @@ async def add_product(
     await db.commit()
     await db.refresh(produit)
     return produit
+
+
+@app.post("/users/me/products/upload")
+async def upload_product_image(
+    file: UploadFile = File(...),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """Endpoint pour uploader une image de produit et obtenir son URL"""
+    url = await save_upload_file(file, allowed_types=["image/jpeg", "image/png", "image/jpg"])
+    return {"image_url": url}
+
 
 @app.post("/users/me/buy/{produit_id}")
 async def buy_product(
@@ -2394,6 +2464,7 @@ async def buy_product(
 
     return {"ok": True, "message": "Achat effectué avec succès"}
 
+
 @app.get("/products/suggestions")
 async def get_suggestions(
     current_user: UserDB = Depends(get_current_user),
@@ -2404,7 +2475,7 @@ async def get_suggestions(
 
 
 # =====================================================
-# ENDPOINTS TONTINE (inchangés)
+# ENDPOINTS TONTINE
 # =====================================================
 @app.get("/tontines", response_model=List[TontineOut])
 async def list_tontines(
@@ -2422,6 +2493,7 @@ async def list_tontines(
         select(TontineDB).where(TontineDB.id.in_(tontine_ids))
     )
     return tontines.scalars().all()
+
 
 @app.post("/tontines", response_model=TontineOut, status_code=status.HTTP_201_CREATED)
 async def create_tontine(
@@ -2484,6 +2556,7 @@ async def create_tontine(
     await db.refresh(tontine)
     return tontine
 
+
 @app.patch("/tontines/{tontine_id}")
 async def update_tontine(
     tontine_id: str,
@@ -2502,6 +2575,7 @@ async def update_tontine(
     tontine.version += 1
     await db.commit()
     return {"ok": True}
+
 
 @app.post("/tontines/{tontine_id}/invite")
 async def invite_member(
@@ -2561,6 +2635,7 @@ async def invite_member(
     await db.commit()
     return {"ok": True, "message": f"Invitation envoyée à {invite_data.telephone}"}
 
+
 @app.post("/tontines/{tontine_id}/join")
 async def join_tontine(
     tontine_id: str,
@@ -2590,6 +2665,7 @@ async def join_tontine(
     membre.version += 1
     await db.commit()
     return {"ok": True, "message": "Vous avez rejoint la tontine"}
+
 
 @app.post("/tontines/{tontine_id}/leave")
 async def leave_tontine(
@@ -2646,6 +2722,7 @@ async def leave_tontine(
         "message": f"Vous avez quitté la tontine.",
         "montant_rembourse": str(montant_a_rembourser)
     }
+
 
 @app.post("/tontines/{tontine_id}/cotiser")
 async def cotiser(
@@ -2737,6 +2814,7 @@ async def cotiser(
         "penalite": str(penalite),
         "message": "Veuillez valider le paiement Wave"
     }
+
 
 @app.post("/tontines/{tontine_id}/retrait")
 async def retrait_beneficiaire(
@@ -2854,6 +2932,7 @@ async def retrait_beneficiaire(
     await db.commit()
     return {"ok": True, "message": f"Retrait de {montant_retrait} FCFA effectué"}
 
+
 @app.get("/tontines/{tontine_id}/members", response_model=List[TontineMembreOut])
 async def get_tontine_members(
     tontine_id: str,
@@ -2874,6 +2953,7 @@ async def get_tontine_members(
         .order_by(TontineMembreDB.ordre)
     )
     return result.scalars().all()
+
 
 @app.get("/tontines/{tontine_id}/cotisations", response_model=List[CotisationOut])
 async def get_cotisations(
@@ -2896,6 +2976,7 @@ async def get_cotisations(
         query = query.where(CotisationDB.cycle_id == cycle_id)
     result = await db.execute(query.order_by(CotisationDB.date.desc()))
     return result.scalars().all()
+
 
 @app.get("/tontines/{tontine_id}/messages", response_model=List[MessageOut])
 async def get_messages(
@@ -2920,6 +3001,7 @@ async def get_messages(
         .offset(skip).limit(min(limit, 100))
     )
     return result.scalars().all()
+
 
 @app.post("/tontines/{tontine_id}/messages", status_code=status.HTTP_201_CREATED)
 async def post_message(
@@ -2947,6 +3029,7 @@ async def post_message(
     await db.commit()
     return {"ok": True}
 
+
 @app.get("/help", response_model=List[HelpArticleOut])
 async def get_help_articles(lang: str = "fr", category: Optional[str] = None):
     async with AsyncSessionLocal() as db:
@@ -2958,7 +3041,7 @@ async def get_help_articles(lang: str = "fr", category: Optional[str] = None):
 
 
 # =====================================================
-# WEBHOOK WAVE (inchangé)
+# WEBHOOK WAVE
 # =====================================================
 @app.post("/webhook/wave")
 async def wave_webhook(request: Request, db: AsyncSession = Depends(get_db)):
@@ -3077,7 +3160,7 @@ async def wave_webhook(request: Request, db: AsyncSession = Depends(get_db)):
 
 
 # =====================================================
-# ENDPOINTS ADMIN (inchangés)
+# ENDPOINTS ADMIN
 # =====================================================
 @app.get("/admin/users")
 async def admin_list_users(
@@ -3111,6 +3194,7 @@ async def admin_list_users(
         "next_cursor": users[-1].id if len(users) == limit else None
     }
 
+
 @app.patch("/admin/users/{user_id}")
 async def admin_update_user(
     user_id: str,
@@ -3125,6 +3209,7 @@ async def admin_update_user(
         setattr(user, key, value)
     await db.commit()
     return {"ok": True}
+
 
 @app.post("/admin/kyc/approve")
 async def admin_approve_kyc(
@@ -3153,6 +3238,7 @@ async def admin_approve_kyc(
     await db.commit()
     return {"ok": True}
 
+
 @app.post("/admin/tasks/send_reminders")
 async def admin_send_reminders(
     admin: UserDB = Depends(get_current_admin),
@@ -3165,6 +3251,7 @@ async def admin_send_reminders(
         await envoyer_rappel_cotisation(tontine, db)
     await db.commit()
     return {"ok": True, "message": "Rappels envoyés"}
+
 
 @app.get("/admin/stats")
 async def admin_stats(
@@ -3190,6 +3277,7 @@ async def admin_stats(
         "total_commission_fcfa": str(total_commission.scalar() or 0),
     }
 
+
 @app.get("/admin/kyc/pending")
 async def admin_kyc_pending(
     admin: UserDB = Depends(get_current_admin),
@@ -3214,6 +3302,7 @@ async def root():
         "docs": "/docs" if settings.ENVIRONMENT != "production" else "disabled"
     }
 
+
 @app.get("/health")
 async def health():
     redis_status = "ok"
@@ -3233,7 +3322,7 @@ async def health():
     except Exception:
         db_status = "error"
 
-    overall = "ok" if db_status == "ok" and redis_status in ("ok",) else "degraded"
+    overall = "ok" if db_status == "ok" and redis_status in ("ok", "unavailable") else "degraded"
     return {
         "status": overall,
         "version": "14.0",
@@ -3242,8 +3331,9 @@ async def health():
         "db": db_status
     }
 
+
 # =====================================================
-# LANCEMENT (uniquement si exécuté directement)
+# LANCEMENT
 # =====================================================
 if __name__ == "__main__":
     import uvicorn
