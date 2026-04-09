@@ -1054,7 +1054,7 @@ class StorageService:
                 logger.error(f"Erreur upload S3: {e}")
                 raise HTTPException(500, "Erreur lors de l'upload du fichier")
         else:
-            # Création du dossier si inexistant
+            # Création du dossier si inexistant (sécurité)
             os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
             filepath = Path(settings.UPLOAD_DIR) / filename
             content = await file.read()
@@ -1655,9 +1655,6 @@ scheduler = AsyncIOScheduler(jobstores={"default": MemoryJobStore()})
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ──
-    # Création du dossier uploads
-    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
-
     await get_redis()
     await PushNotificationService.initialize()
 
@@ -1666,7 +1663,7 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
         logger.info("Tables de la base de données créées/vérifiées")
 
-    # Compte plateforme
+    # Compte plateforme et admin
     async with AsyncSessionLocal() as db:
         platform = await db.get(UserDB, settings.PLATFORM_ACCOUNT_ID)
         if not platform:
@@ -1683,7 +1680,6 @@ async def lifespan(app: FastAPI):
             db.add(platform)
             await db.commit()
 
-        # Admin par défaut si aucun admin humain
         admin_count_result = await db.execute(
             select(func.count()).select_from(UserDB).where(
                 UserDB.is_admin == True,
@@ -1692,10 +1688,7 @@ async def lifespan(app: FastAPI):
         )
         if admin_count_result.scalar() == 0:
             if not settings.DEFAULT_ADMIN_PASSWORD:
-                logger.critical(
-                    "Aucun admin trouvé et DEFAULT_ADMIN_PASSWORD non défini. "
-                    "Définissez DEFAULT_ADMIN_PASSWORD dans .env !"
-                )
+                logger.critical("DEFAULT_ADMIN_PASSWORD non défini.")
             else:
                 default_admin = UserDB(
                     email=settings.DEFAULT_ADMIN_EMAIL,
@@ -1711,7 +1704,6 @@ async def lifespan(app: FastAPI):
                 await db.commit()
                 logger.info(f"Compte admin créé: {settings.DEFAULT_ADMIN_EMAIL}")
 
-        # Articles d'aide initiaux
         existing_help_result = await db.execute(select(HelpArticle).limit(1))
         if not existing_help_result.scalar_one_or_none():
             articles = [
@@ -1759,11 +1751,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
+
+# === CORRECTION : créer le dossier uploads avant de le monter ===
+os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")
 
 
 async def scheduled_reminders():
-    """Tâche planifiée — verrou Redis pour multi-instances."""
     lock_key = "lock:scheduled_reminders"
     lock_value = str(uuid.uuid4())
     locked = await redis_setnx(lock_key, lock_value, ttl=300)
@@ -3344,3 +3338,4 @@ if __name__ == "__main__":
         reload=settings.ENVIRONMENT == "development",
         log_level="debug" if settings.DEBUG else "info",
     )
+    
