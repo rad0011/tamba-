@@ -16,3 +16,4 @@ passlib[bcrypt]
 bcrypt
 apscheduler
 aiobreaker
+email-validator
