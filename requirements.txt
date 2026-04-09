@@ -17,6 +17,3 @@ bcrypt
 apscheduler
 aiobreaker
 email-validator
-twilio
-firebase-admin
-aioboto3
